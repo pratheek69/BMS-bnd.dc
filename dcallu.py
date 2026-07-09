@@ -16,7 +16,7 @@ class Config:
     EVENT_CODE = "ET00502689"
     STATE_FILE = "seats.json"
     MAX_RUNTIME_SECONDS = (5 * 3600) + (55 * 60) # 5 hours 55 mins
-    NTFY_URL = "https://ntfy.sh/YTT549prEetlAnek"
+    NTFY_URL = "https://ntfy.sh/bnd_dc"
     
     # ---------------------------------------------------------
     # Set your targeted time range here in 24-hour format.
