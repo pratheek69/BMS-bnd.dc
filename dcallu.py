@@ -11,20 +11,19 @@ from curl_cffi import requests as cffi_requests
 
 class Config:
     """Central configuration for the BookMyShow Scraper."""
-    DATES = ["20260801"]
+    DATES = ["20260801"] 
     VENUE_CODE = "ALUC"
-    EVENT_CODE = "ET00502689"
+    EVENT_CODE = "ET00502689" 
     STATE_FILE = "seats.json"
-    MAX_RUNTIME_SECONDS = (5 * 3600) + (55 * 60) # 5 hours 55 mins
+    MAX_RUNTIME_SECONDS = (5 * 3600) + (45 * 60) 
     NTFY_URL = "https://ntfy.sh/bnd_dc"
     
-    # ---------------------------------------------------------
-    # Set your targeted time range here in 24-hour format.
-    # Example: ("16:00", "23:00") will only check shows 
-    # between 4:00 PM and 11:00 PM. 
-    # Change to None to check all shows.
-    # ---------------------------------------------------------
-    TARGET_TIME_RANGE = ("07:00", "16:00") 
+    # --- FILTERS ---
+    # Set to None to check all shows, or ("16:00", "23:00") for specific times
+    TARGET_TIME_RANGE = ("12:00", "20:30") 
+    
+    # Set to "PCX SCREEN", "DOLBY CINEMA", etc. Set to None to track ALL screens in the venue.
+    TARGET_SCREEN_ATTRIBUTE = "DOLBY CINEMA"
 
     PROXIES = {
         "http": "socks5://127.0.0.1:40000",
@@ -63,18 +62,14 @@ class Utils:
     def is_within_time_range(show_time_str: str, time_range: Optional[tuple]) -> bool:
         if not time_range:
             return True
-            
         try:
-            # Convert BMS format (e.g., "08:00 AM") to time object
             show_time = datetime.strptime(show_time_str.strip(), "%I:%M %p").time()
-            # Convert Config bounds (e.g., "15:00") to time objects
             start_time = datetime.strptime(time_range[0], "%H:%M").time()
             end_time = datetime.strptime(time_range[1], "%H:%M").time()
-            
             return start_time <= show_time <= end_time
         except ValueError as e:
             print(f"    -> ⚠️ Time parsing error for '{show_time_str}': {e}")
-            return True  # Fallback to checking the session if parsing fails
+            return True
 
     @staticmethod
     def humanize_date(date_str: str) -> str:
@@ -87,15 +82,15 @@ class Utils:
         return f"{day}{suffix} {dt.strftime('%B')}"
 
     @staticmethod
-    def trigger_ntfy(message: str, booking_url: str) -> None:
-        print(f"\n[!] ALERTING VIA NTFY: {message}")
+    def trigger_ntfy(message: str, booking_url: str, priority: str = "urgent") -> None:
+        print(f"\n[!] ALERTING VIA NTFY:\n{message}")
         try:
             resp = requests.post(
                 Config.NTFY_URL,
                 data=message.encode("utf-8"),
                 headers={
-                    "Priority": "urgent",
-                    "Title": "Dolby Cinema",
+                    "Priority": priority,
+                    "Title": "BND Alert",
                     "Click": booking_url
                 },
                 timeout=10
@@ -111,7 +106,6 @@ class GitStateManager:
         self.state_file = state_file
 
     def quiet_git_pull(self) -> None:
-        """Fetches and hard resets to exactly match remote."""
         subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, check=False)
         subprocess.run(["git", "reset", "--hard", "origin/main"], capture_output=True, check=False)
 
@@ -120,7 +114,6 @@ class GitStateManager:
         return res.returncode == 0
 
     def read_local_state(self) -> Dict[str, Any]:
-        """Reads the JSON from disk without touching Git."""
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file, "r") as f:
@@ -130,17 +123,13 @@ class GitStateManager:
         return {}
 
     def load_state(self) -> Dict[str, Any]:
-        """Syncs with remote and loads the freshest state into memory."""
         self.quiet_git_pull()
         return self.read_local_state()
 
     def save_state(self, deltas: Dict[str, Any], commit_msg: str) -> Dict[str, Any]:
-        """Merges local deltas with latest Git state and pushes."""
         for attempt in range(3):
             self.quiet_git_pull()
             latest_state = self.read_local_state()
-            
-            # Apply all delta changes locally
             latest_state.update(deltas)
                 
             with open(self.state_file, "w") as f:
@@ -177,12 +166,11 @@ class BookMyShowScraper:
         if self.use_warp:
             print("    -> 🚨 [IP ROTATION] WARP ON -> OFF (Switching to Runner IP)...")
             subprocess.run(["warp-cli", "--accept-tos", "disconnect"], capture_output=True, check=False)
-            time.sleep(2) # Brief pause to let network settle
+            time.sleep(2)
         else:
             print("    -> 🚨 [IP ROTATION] WARP OFF -> ON (Switching to Cloudflare Proxy)...")
             subprocess.run(["warp-cli", "--accept-tos", "connect"], capture_output=True, check=False)
-            # INCREASED: Give GitHub/WARP 8 seconds to fully establish the SOCKS port
-            time.sleep(8) 
+            time.sleep(8) # Allow proxy port to establish
         self.use_warp = not self.use_warp
 
     def make_request(self, method: str, url: str, max_retries: int = 3, **kwargs) -> Optional[Any]:
@@ -204,14 +192,12 @@ class BookMyShowScraper:
                 return resp
                 
             except Exception as e:
-                # Truncate the massive curl error for cleaner logs
                 error_msg = str(e).split('first for more details.')[0].strip()
                 print(f"    -> ⚠️ Network exception on attempt {attempt}: {error_msg}")
-                
                 if attempt < max_retries:
-                    # THE FIX: If the proxy connection completely fails, force it off!
+                    # Fix: Turn off proxy if the port crashes
                     if self.use_warp:
-                        print("    -> 🚨 Proxy seems dead! Forcing WARP off to recover...")
+                        print("    -> 🚨 Proxy dead! Forcing WARP off to recover...")
                         self.toggle_warp()
                     else:
                         time.sleep(5)
@@ -222,35 +208,29 @@ class BookMyShowScraper:
     def fetch_sessions(self) -> List[Dict[str, str]]:
         sessions = []
         for date_code in Config.DATES:
-            print(f"\n[NETWORK] Fetching sessions for Date: {date_code}...")
             url = f"https://in.bookmyshow.com/api/movies-data/seatlayout/v1/primary?eventCode={Config.EVENT_CODE}&dateCode={date_code}&regionCode=HYD&venueCode={Config.VENUE_CODE}"
-            
             resp = self.make_request('GET', url, headers=Config.GET_HEADERS)
             if not resp or resp.status_code != 200:
-                print(f"    -> Failed fetching {date_code}. Skipping...")
                 continue
                 
             try:
                 shows = resp.json().get("data", {}).get("showTimes", [])
                 
-                # Filter for DOLBY CINEMA AND checking against our time range bounds
-                dc_shows = [
-                    s for s in shows 
-                    if s.get("attributes") == "DOLBY CINEMA" 
-                    and Utils.is_within_time_range(s.get("showTime", ""), Config.TARGET_TIME_RANGE)
-                ]
+                # Filter by Time Range AND Screen Attribute (if defined)
+                valid_shows = []
+                for s in shows:
+                    time_ok = Utils.is_within_time_range(s.get("showTime", ""), Config.TARGET_TIME_RANGE)
+                    attr_ok = (Config.TARGET_SCREEN_ATTRIBUTE is None) or (s.get("attributes") == Config.TARGET_SCREEN_ATTRIBUTE)
+                    
+                    if time_ok and attr_ok:
+                        valid_shows.append(s)
                 
-                for show in dc_shows:
+                for show in valid_shows:
                     sessions.append({
                         "sessionId": show["sessionId"],
                         "dateCode": show["showDateCode"],
                         "time": show["showTime"]
                     })
-                    
-                if Config.TARGET_TIME_RANGE:
-                    print(f"    -> Filtered {len(dc_shows)} DOLBY CINEMA sessions for {date_code} within time range {Config.TARGET_TIME_RANGE}.")
-                else:
-                    print(f"    -> Filtered {len(dc_shows)} DOLBY CINEMA sessions for {date_code}.")
                     
             except Exception as e:
                 print(f"    -> JSON Parse error for {date_code}: {e}")
@@ -273,20 +253,19 @@ class BookMyShowScraper:
 
     @staticmethod
     def parse_layout(str_data: str) -> Dict[str, List[str]]:
-        if not str_data:
-            return {}
+        if not str_data: return {}
         
         parts = str_data.split("||")
         rows_data = parts[1] if len(parts) > 1 else parts[0]
         
         available_seats = {}
         for row in rows_data.split("|"):
-            if ":" not in row:
-                continue
+            if ":" not in row: continue
             
             elements = row.split(":")
             row_letter = elements[1]
-            # Use walrus operator to directly pull matched seats 
+            
+            # Universal Regex Fix: Finds Status 1 (Available) seats across any tier
             seats = [m.group(1) for s in elements[2:] if (m := re.search(r"[A-Z]1(\d+)\+", s))]
             
             if seats:
@@ -296,31 +275,57 @@ class BookMyShowScraper:
 
     def run(self):
         start_time = time.time()
-        print("="*50 + "\n🚀 STARTING BMS SEAT SCRAPER\n" + "="*50)
-        
-        target_sessions = self.fetch_sessions()
-        if not target_sessions:
-            print("No valid sessions found. Exiting.")
-            return
-
-        print(f"\n✅ Found a total of {len(target_sessions)} DOLBY CINEMA sessions to monitor.\n" + "="*50)
+        print("="*50 + "\n🚀 STARTING BMS ADVANCE BOOKING TRACKER\n" + "="*50)
+        print(f"Tracking Venue: {Config.VENUE_CODE} | Event: {Config.EVENT_CODE}")
+        print(f"Time Range Filter: {Config.TARGET_TIME_RANGE}")
         
         state = self.state_manager.load_state()
         is_first_run = not bool(state)
-        print(f"[STATE] {'Empty state found. Initializing baseline silently...' if is_first_run else f'Loaded existing state for {len(state)} sessions.'}")
+        shows_are_live = not is_first_run
+        
+        if shows_are_live:
+            print(f"[STATE] Loaded existing state for {len(state)} sessions. Moving to seat tracking.")
+        else:
+            print("[STATE] No previous state found. Monitoring for advance booking drop...")
 
         cycle_count = 1
         while (time.time() - start_time) < Config.MAX_RUNTIME_SECONDS:
-            print(f"\n{'='*50}\n🔄 STARTING POLLING CYCLE {cycle_count}\n{'='*50}")
+            print(f"\n{'='*50}\n🔄 POLLING CYCLE {cycle_count}\n{'='*50}")
             
             state = self.state_manager.load_state()
             deltas = {}
             
+            # ---------------------------------------------------------
+            # PHASE 1: WAITING FOR SHOWS TO BE LISTED
+            # ---------------------------------------------------------
+            target_sessions = self.fetch_sessions()
+            total_sessions = len(target_sessions)
+            
+            if total_sessions == 0:
+                print(f"    -> 🔴 Not listed yet. Sleeping for 30 seconds before checking again...")
+                time.sleep(30) 
+                cycle_count += 1
+                continue 
+                
+            # If we reach here, sessions exist! Did they JUST go live?
+            if not shows_are_live:
+                print(f"\n    -> 🟢🚨 ADVANCE BOOKINGS JUST OPENED! Found {total_sessions} shows matching filters!")
+                shows_are_live = True
+                
+                booking_url = f"https://in.bookmyshow.com/buytickets/{Config.EVENT_CODE}-hyderabad/movie-hyd-{Config.VENUE_CODE}-MT/"
+                msg = (f"🚨 ADVANCE BOOKING OPEN! 🚨\n\n"f"The movie is now live at {Config.VENUE_CODE}!\n"f"{total_sessions} valid shows have been added.\n\n"f"Book IMMEDIATELY:\n{booking_url}")
+                Utils.trigger_ntfy(msg, booking_url, priority="max")
+                
+                time.sleep(10) # Let backend populate layouts
+
+            # ---------------------------------------------------------
+            # PHASE 2: STANDARD SEAT TRACKING 
+            # ---------------------------------------------------------
             for index, session in enumerate(target_sessions, 1):
                 s_id, s_date, s_time = session["sessionId"], session["dateCode"], session["time"]
                 
-                print(f"\n[{index}/{len(target_sessions)}] Checking Session {s_id} ({s_date} @ {s_time})\n    -> Sleeping for 20s...")
-                time.sleep(20)
+                print(f"\n[{index}/{total_sessions}] Checking Session {s_id} ({s_date} @ {s_time})\n    -> Sleeping for 25s...")
+                time.sleep(25)
                 
                 str_data = self.fetch_seat_layout(s_id)
                 if not str_data:
@@ -331,7 +336,6 @@ class BookMyShowScraper:
                 current_total = sum(len(seats) for seats in current_seats.values())
                 print(f"    -> Parse successful. Available Seats: {current_total}")
                 
-                # Fetch baseline state for session
                 session_state = state.setdefault(s_id, {"date": s_date, "time": s_time, "total": 0, "rows": {}})
                 previous_total = session_state.get("total", 0)
                 previous_rows = session_state.get("rows", {})
@@ -351,12 +355,11 @@ class BookMyShowScraper:
                     if not is_first_run:
                         if newly_unblocked >= 6:
                             booking_url = f"https://in.bookmyshow.com/movies/HYD/seat-layout/{Config.EVENT_CODE}/{Config.VENUE_CODE}/{s_id}/{s_date}"
-                            msg = (f"🕷️🕸️ BND Seats Available\n\n{', '.join(sorted(unblocked_rows))} rows unblocked\n"f"{newly_unblocked} seats available\n{Utils.humanize_date(s_date)} • {s_time}\n\nBook now:\n{booking_url}")
+                            msg = (f"🎬 BND Seats Available!\n\n{', '.join(sorted(unblocked_rows))} rows unblocked\n"f"{newly_unblocked} seats available\n{Utils.humanize_date(s_date)} • {s_time}\n\nBook now:\n{booking_url}")
                             Utils.trigger_ntfy(msg, booking_url)
                         else:
                             print(f"    -> 🟡 Less than 6 seats unblocked. Skipping notification.")
                     
-                    # Log change to deltas map
                     session_state.update({"rows": current_seats, "total": current_total})
                     deltas[s_id] = session_state
 
@@ -373,13 +376,13 @@ class BookMyShowScraper:
             else:
                 print("\n[STATE] Cycle finished. No changes detected.")
                 
-            if is_first_run:
+            if is_first_run and shows_are_live:
                 is_first_run = False
                 print("[STATE] First run baseline has been successfully established.")
                 
             cycle_count += 1
             
-        print("\n🏁 Time limit reached (5h 55m). Gracefully shutting down.")
+        print(f"\n🏁 Time limit reached. Gracefully shutting down.")
 
 
 if __name__ == "__main__":
