@@ -19,10 +19,7 @@ class Config:
     NTFY_URL = "https://ntfy.sh/bnd_dc"
     
     # --- FILTERS ---
-    # Set to None to check all shows, or ("16:00", "23:00") for specific times
-    TARGET_TIME_RANGE = ("12:00", "20:30") 
-    
-    # Set to "PCX SCREEN", "DOLBY CINEMA", etc. Set to None to track ALL screens in the venue.
+    TARGET_TIME_RANGE = ("12:00", "17:00") 
     TARGET_SCREEN_ATTRIBUTE = "DOLBY CINEMA"
 
     PROXIES = {
@@ -170,7 +167,7 @@ class BookMyShowScraper:
         else:
             print("    -> 🚨 [IP ROTATION] WARP OFF -> ON (Switching to Cloudflare Proxy)...")
             subprocess.run(["warp-cli", "--accept-tos", "connect"], capture_output=True, check=False)
-            time.sleep(8) # Allow proxy port to establish
+            time.sleep(8) 
         self.use_warp = not self.use_warp
 
     def make_request(self, method: str, url: str, max_retries: int = 3, **kwargs) -> Optional[Any]:
@@ -182,8 +179,9 @@ class BookMyShowScraper:
                 
                 print(f"    -> Status: {resp.status_code} (Using WARP: {self.use_warp})")
                 
-                if resp.status_code == 429:
-                    print(f"    -> ⚠️ Rate limited (429) on attempt {attempt}/{max_retries}.")
+                # FIXED: Now handles both Rate Limits (429) AND Security Blocks (403)
+                if resp.status_code in [403, 429]:
+                    print(f"    -> ⚠️ Blocked/Rate limited ({resp.status_code}) on attempt {attempt}/{max_retries}.")
                     if attempt < max_retries:
                         self.toggle_warp()
                         print("    -> Retrying request...")
@@ -195,12 +193,13 @@ class BookMyShowScraper:
                 error_msg = str(e).split('first for more details.')[0].strip()
                 print(f"    -> ⚠️ Network exception on attempt {attempt}: {error_msg}")
                 if attempt < max_retries:
-                    # Fix: Turn off proxy if the port crashes
-                    if self.use_warp:
-                        print("    -> 🚨 Proxy dead! Forcing WARP off to recover...")
+                    # FIXED: Turn WARP ON if standard IP is blackholed, or OFF if proxy dies
+                    if not self.use_warp:
+                        print("    -> 🚨 Runner IP blackholed! Turning WARP ON to escape...")
                         self.toggle_warp()
                     else:
-                        time.sleep(5)
+                        print("    -> 🚨 Proxy dead! Forcing WARP OFF to recover...")
+                        self.toggle_warp()
                     print("    -> Retrying request...")
                     continue
         return None
@@ -216,7 +215,6 @@ class BookMyShowScraper:
             try:
                 shows = resp.json().get("data", {}).get("showTimes", [])
                 
-                # Filter by Time Range AND Screen Attribute (if defined)
                 valid_shows = []
                 for s in shows:
                     time_ok = Utils.is_within_time_range(s.get("showTime", ""), Config.TARGET_TIME_RANGE)
@@ -233,7 +231,9 @@ class BookMyShowScraper:
                     })
                     
             except Exception as e:
-                print(f"    -> JSON Parse error for {date_code}: {e}")
+                # FIXED: Silences the "Expecting value" error when movies aren't listed yet
+                if "Expecting value" not in str(e):
+                    print(f"    -> JSON Parse error for {date_code}: {e}")
                 
         return sessions
 
@@ -265,8 +265,8 @@ class BookMyShowScraper:
             elements = row.split(":")
             row_letter = elements[1]
             
-            # Universal Regex Fix: Finds Status 1 (Available) seats across any tier
-            seats = [m.group(1) for s in elements[2:] if (m := re.search(r"[A-Z]1(\d+)\+", s))]
+            # FIXED: Capture group (\d+) moved to the end to grab the REAL seat number!
+            seats = [m.group(1) for s in elements[2:] if (m := re.search(r"[A-Z]1\d+\+(\d+)", s))]
             
             if seats:
                 available_seats[row_letter] = seats
@@ -307,7 +307,6 @@ class BookMyShowScraper:
                 cycle_count += 1
                 continue 
                 
-            # If we reach here, sessions exist! Did they JUST go live?
             if not shows_are_live:
                 print(f"\n    -> 🟢🚨 ADVANCE BOOKINGS JUST OPENED! Found {total_sessions} shows matching filters!")
                 shows_are_live = True
@@ -316,7 +315,7 @@ class BookMyShowScraper:
                 msg = (f"🚨 ADVANCE BOOKING OPEN! 🚨\n\n"f"The movie is now live at {Config.VENUE_CODE}!\n"f"{total_sessions} valid shows have been added.\n\n"f"Book IMMEDIATELY:\n{booking_url}")
                 Utils.trigger_ntfy(msg, booking_url, priority="max")
                 
-                time.sleep(10) # Let backend populate layouts
+                time.sleep(10) 
 
             # ---------------------------------------------------------
             # PHASE 2: STANDARD SEAT TRACKING 
@@ -326,6 +325,11 @@ class BookMyShowScraper:
                 
                 print(f"\n[{index}/{total_sessions}] Checking Session {s_id} ({s_date} @ {s_time})\n    -> Sleeping for 25s...")
                 time.sleep(25)
+                
+                # FIXED: The Emergency Brake to prevent GitHub limits from crashing the script
+                if (time.time() - start_time) > Config.MAX_RUNTIME_SECONDS:
+                    print("    -> ⏳ Mid-cycle time limit reached! Breaking out to ensure safe shutdown.")
+                    break
                 
                 str_data = self.fetch_seat_layout(s_id)
                 if not str_data:
