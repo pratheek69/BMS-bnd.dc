@@ -1,4 +1,4 @@
-name: The Odyssey BND
+name: The DC BND
 
 on:
   workflow_dispatch:
